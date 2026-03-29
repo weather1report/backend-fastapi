@@ -1,50 +1,151 @@
-from fastapi import FastAPI, Path, Query, Response
-from math import sqrt
-import random
+from fastapi import FastAPI, Query, Response, HTTPException
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from pydantic import BaseModel
 
+class Category(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+
+class CategoryBase(BaseModel):
+    name: str
+
+class CategoryId(CategoryBase):
+    id: int
+
+
+class Product(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    price: float
+    description: str | None = None
+    category_id: int | None = Field(default=None, foreign_key="category.id")
+
+class ProductBase(BaseModel):
+    name: str
+    price: float
+    description: str | None = None
+    category_id: int | None = None
+
+class ProductId(BaseModel):
+    id: int
+    name: str | None = None
+    price: float | None = None
+    description: str | None = None
+    category_id: int | None = None
+
+
+engine = create_engine("sqlite:///database.db", echo=True)
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
 
 app=FastAPI()
 
-@app.get("/about")
-def about():
-    return {
-        "ФИО": "Ермаков Егор Андреевич",
-        "группа": "Т-333901-ИСТ",
-        "курс": 3,
-        "название вуза": "НТИ (филиал) УРФУ",
-        "Github": "https://github.com/weather1report"
-    }
-
-@app.get("/rnd")
-def randReturn(min:int = 1, max:int = 100):
-    return random.randint(min, max)
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
 
 
-@app.post("/t_square", status_code=200)
-def triangle(response: Response, a:float = Query(gt=0), b:float = Query(gt=0), c:float = Query(gt=0)):
-    if (b+c <= a or c+a <= b or a+b <= c):
-        response.status_code = 400
-        return {"message": "Incorrect Data"}
-    p = (a + b + c) / 2
-    square = sqrt(p*(p-a)*(p-b)*(p-c))
-    return {
-        "perimeter": p*2,
-        "square": square
-    }
+@app.post("/categories/", status_code=201)
+def create_category(category: CategoryBase):
+    with Session(engine) as session:
+        db_category = Category(name=category.name)
+        session.add(db_category)
+        session.commit()
+        session.refresh(db_category)
+        return CategoryId(id=db_category.id, name=db_category.name)
 
-@app.get("/convert/{from_unit}/{to_unit}/{value}")
-def convert(
-    from_unit:str = Path(..., pattern=r"^(celsius|fahrenheit)$"),
-    to_unit:str = Path(..., pattern=r"^(celsius|fahrenheit)$"),
-    value: float = Path(...)
-    ):
-    res = value
-    if from_unit == "celsius" and to_unit == "fahrenheit":
-        res = value * 1.8 + 32
-    if from_unit == "fahrenheit" and to_unit == "celsius":
-        res = (value - 32) / 1.8
 
-    return {
-        "result": f"{res}{("°F" if to_unit == "fahrenheit" else "°C")}",
-        "input": f"{value}{("°F" if from_unit == "fahrenheit" else "°C")}"
-    }
+@app.get("/categories/")
+def read_categories():
+    with Session(engine) as session:
+        categories = session.exec(select(Category)).all()
+        return categories
+
+
+@app.get("/categories/{category_id}")
+def read_category(category_id: int):
+    with Session(engine) as session:
+        category = session.exec(select(Category).where(Category.id == category_id)).one()
+        if not category:
+            raise HTTPException(status_code=404, detail="Категория не найдена")
+        return CategoryId(id = category.id, name = category.name)
+
+
+@app.put("/categories/", response_model=CategoryId)
+def update_category(category_update: CategoryId):
+    with Session(engine) as session:
+        category = session.exec(select(Category).where(Category.id == category_update.id)).one()
+        if not category:
+            raise HTTPException(status_code=404, detail="Категория не найдена")
+
+        category.name = category_update.name
+        session.add(category)
+        session.commit()
+        session.refresh(category)
+        return CategoryId(id = category.id, name = category.name)
+
+
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: int):
+    with Session(engine) as session:
+        category = session.exec(select(Category).where(Category.id == category_id)).one()
+        if not category:
+            raise HTTPException(status_code=404, detail="Категория не найдена")
+        session.delete(category)
+        session.commit()
+        return {"detail": "Категория успешно удалена"}
+
+
+
+@app.post("/products/", status_code=201)
+def create_product(product: ProductBase):
+    with Session(engine) as session:
+        db_product = Product(name=product.name, price=product.price, description=product.description, category_id=product.category_id)
+        session.add(db_product)
+        session.commit()
+        session.refresh(db_product)
+        return ProductId(id=db_product.id, name=db_product.name, price=db_product.price, description=db_product.description, category_id=db_product.category_id)
+
+
+@app.get("/products/")
+def read_products():
+    with Session(engine) as session:
+        products = session.exec(select(Product)).all()
+        return products
+
+
+@app.get("/products/{product_id}")
+def read_category(product_id: int):
+    with Session(engine) as session:
+        product = session.exec(select(Product).where(Product.id == product_id)).one()
+        if not product:
+            raise HTTPException(status_code=404, detail="Продукт не найден")
+        return ProductId(id=product.id, name=product.name, price=product.price, description=product.description, category_id=product.category_id)
+
+
+@app.put("/products/", response_model=ProductId)
+def update_product(product_update: ProductId):
+    with Session(engine) as session:
+        product = session.exec(select(Product).where(Product.id == product_update.id)).one()
+        if not product:
+            raise HTTPException(status_code=404, detail="Продукт не найден")
+
+        product.name = product_update.name or product.name
+        product.price = product_update.price or product.price
+        product.description = product_update.description or product.description
+        product.category_id = product_update.category_id or product.category_id
+        session.add(product)
+        session.commit()
+        session.refresh(product)
+        return ProductId(id=product.id, name=product.name, price=product.price, description=product.description, category_id=product.category_id)
+
+
+@app.delete("/products/{product_id}")
+def delete_product(product_id: int):
+    with Session(engine) as session:
+        product = session.exec(select(Product).where(Product.id == product_id)).one()
+        if not product:
+            raise HTTPException(status_code=404, detail="Продукт не найден")
+        session.delete(product)
+        session.commit()
+        return {"detail": "Продукт успешно удален"}
