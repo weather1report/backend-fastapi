@@ -1,50 +1,93 @@
 from fastapi import FastAPI, Path, Query, Response
-from math import sqrt
+from pydantic import BaseModel, EmailStr, Field, field_validator
 import random
-
+import re
+from typing import List, Dict, Any
 
 app=FastAPI()
 
-@app.get("/about")
-def about():
-    return {
-        "ФИО": "Ермаков Егор Андреевич",
-        "группа": "Т-333901-ИСТ",
-        "курс": 3,
-        "название вуза": "НТИ (филиал) УРФУ",
-        "Github": "https://github.com/weather1report"
-    }
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    full_name: str | None = None
+    age: int | None = Field(None, ge=18, le=120)
+    is_active: bool = True
 
-@app.get("/rnd")
-def randReturn(min:int = 1, max:int = 100):
-    return random.randint(min, max)
+    @field_validator('username')
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        if not re.match(r'^[a-zA-Z0-9]+$', v):
+            raise ValueError('только буквы и цифры')
+        return v
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if not re.search(r'[0-9]', v) or not re.search(r'[a-zA-Z]', v):
+            raise ValueError('минимум 1 буква и 1 цифра')
+        return v
 
 
-@app.post("/t_square", status_code=200)
-def triangle(response: Response, a:float = Query(gt=0), b:float = Query(gt=0), c:float = Query(gt=0)):
-    if (b+c <= a or c+a <= b or a+b <= c):
-        response.status_code = 400
-        return {"message": "Incorrect Data"}
-    p = (a + b + c) / 2
-    square = sqrt(p*(p-a)*(p-b)*(p-c))
-    return {
-        "perimeter": p*2,
-        "square": square
-    }
+@app.post("/user")
+def Create_user(user: UserCreate):
+    return {**user.model_dump(exclude={"password"}), "id": random.randint(1, 100)}
 
-@app.get("/convert/{from_unit}/{to_unit}/{value}")
-def convert(
-    from_unit:str = Path(..., pattern=r"^(celsius|fahrenheit)$"),
-    to_unit:str = Path(..., pattern=r"^(celsius|fahrenheit)$"),
-    value: float = Path(...)
-    ):
-    res = value
-    if from_unit == "celsius" and to_unit == "fahrenheit":
-        res = value * 1.8 + 32
-    if from_unit == "fahrenheit" and to_unit == "celsius":
-        res = (value - 32) / 1.8
 
-    return {
-        "result": f"{res}{("°F" if to_unit == "fahrenheit" else "°C")}",
-        "input": f"{value}{("°F" if from_unit == "fahrenheit" else "°C")}"
-    }
+
+class ItemCreate(BaseModel):
+    name: str = Field(..., min_length=3, max_length=100)
+    description: str | None = Field(None, max_length=1000)
+    price: float = Field(..., ge=0.01, le=1_000_000)
+    tax: float = Field(0, ge=0, le=100)
+    tags: List[str] | None = Field(None, max_length=5)
+    quantity: int | None = Field(None, ge=0, le=1000)
+
+@app.post("/items")
+def Create_item(item: ItemCreate):
+    return {**item.model_dump(), "price_after_tax": item.price*(1 - item.tax/100)}
+
+
+class User(BaseModel):
+    name: str
+    age: int
+    active: bool
+
+class Filters(BaseModel):
+    min_age: int | None = Field(None, ge=0, le=150)
+    max_age: int | None = Field(None, ge=0, le=150)
+    active_only: bool | None = None
+
+class FilterRequest(BaseModel):
+    users: List[User] = Field(..., max_items=100)
+    filters: Filters
+
+class FilterResponse(BaseModel):
+    total_input: int
+    filtered_count: int
+    filtered_users: List[User]
+    applied_filters: Filters
+
+@app.post("/filter-users")
+def Filter_users(request: FilterRequest):
+    users = request.users
+    if request.filters.min_age:
+        users = [x for x in users if x.age >= request.filters.min_age]
+    if request.filters.max_age:
+        users = [x for x in users if x.age <= request.filters.max_age]
+    if request.filters.active_only:
+        users = [x for x in users if x.active]
+    return FilterResponse(total_input=len(request.users), filtered_count=len(users), filtered_users=users, applied_filters=request.filters)
+
+
+class UserUpdate(BaseModel):
+    email: EmailStr
+    full_name: str
+    age: int = Field(None, ge=18, le=120)
+    is_active: bool
+
+@app.put("/users/{user_id}")
+def Update_user(user_id: int, user_update: UserUpdate):
+    return {"id": user_id, "username": "Anton", **user_update.model_dump()}
+
+
+
