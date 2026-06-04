@@ -1,151 +1,249 @@
-from fastapi import FastAPI, Query, Response, HTTPException
+from datetime import datetime
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, field_validator
 from sqlmodel import Field, Session, SQLModel, create_engine, select
-from pydantic import BaseModel
 
-class Category(SQLModel, table=True):
+
+TaskStatus = Literal["new", "in_progress", "completed"]
+DeadlineSort = Literal["asc", "desc"]
+
+
+class User(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
+    login: str = Field(index=True, unique=True)
+    password: str
 
-class CategoryBase(BaseModel):
-    name: str
 
-class CategoryId(CategoryBase):
+class UserBase(BaseModel):
+    login: str
+    password: str
+
+    @field_validator("login")
+    @classmethod
+    def validate_login(cls, login: str):
+        if not login.strip():
+            raise ValueError("Логин не может быть пустым")
+        return login
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, password: str):
+        if not password.strip():
+            raise ValueError("Пароль не может быть пустым")
+        return password
+
+
+class UserId(BaseModel):
+    id: int
+    login: str
+
+
+class Task(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str = Field(index=True)
+    priority: int
+    deadline: datetime
+    description: str | None = None
+    status: str = Field(default="new", index=True)
+
+    user_id: int = Field(foreign_key="user.id", index=True)
+
+
+class TaskBase(BaseModel):
+    title: str
+    priority: int
+    deadline: datetime
+    description: str | None = None
+    status: TaskStatus = "new"
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, title: str):
+        if not title.strip():
+            raise ValueError("Название задачи не может быть пустым")
+
+        return title
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, priority: int):
+        if priority < 1 or priority > 5:
+            raise ValueError("Приоритет должен быть числом от 1 до 5")
+
+        return priority
+
+
+class TaskId(TaskBase):
     id: int
 
 
-class Product(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
-    price: float
-    description: str | None = None
-    category_id: int | None = Field(default=None, foreign_key="category.id")
-
-class ProductBase(BaseModel):
-    name: str
-    price: float
-    description: str | None = None
-    category_id: int | None = None
-
-class ProductId(BaseModel):
+class TaskUpdate(BaseModel):
     id: int
-    name: str | None = None
-    price: float | None = None
+    title: str | None = None
+    priority: int | None = None
+    deadline: datetime | None = None
     description: str | None = None
-    category_id: int | None = None
+    status: TaskStatus | None = None
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, title: str | None):
+        if title is not None and not title.strip():
+            raise ValueError("Название задачи не может быть пустым")
+
+        return title
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, priority: int | None):
+        if priority is not None and (priority < 1 or priority > 5):
+            raise ValueError("Приоритет должен быть числом от 1 до 5")
+
+        return priority
 
 engine = create_engine("sqlite:///database.db", echo=True)
+
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
-app=FastAPI()
+app = FastAPI()
+
+security = HTTPBasic()
 
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
 
-
-@app.post("/categories/", status_code=201)
-def create_category(category: CategoryBase):
+def get_current_user(
+    credentials: HTTPBasicCredentials = Depends(security),
+):
     with Session(engine) as session:
-        db_category = Category(name=category.name)
-        session.add(db_category)
+        user = session.exec(select(User).where(User.login == credentials.username)).first()
+
+        if not user or user.password != credentials.password:
+            raise HTTPException(
+                status_code=401,
+                detail="Неверный логин или пароль",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return user
+
+@app.post("/register/")
+def register_user(user: UserBase):
+    with Session(engine) as session:
+        existing_user = session.exec(
+            select(User).where(User.login == user.login)
+        ).first()
+
+        if existing_user:
+            raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует",)
+
+        db_user = User(login=user.login, password=user.password)
+
+        session.add(db_user)
         session.commit()
-        session.refresh(db_category)
-        return CategoryId(id=db_category.id, name=db_category.name)
+        session.refresh(db_user)
 
+        return UserId(id=db_user.id, login=db_user.login)
 
-@app.get("/categories/")
-def read_categories():
+@app.post("/tasks/")
+def create_task(task: TaskBase, current_user: User = Depends(get_current_user),):
     with Session(engine) as session:
-        categories = session.exec(select(Category)).all()
-        return categories
+        db_task = Task(
+            title=task.title,
+            priority=task.priority,
+            deadline=task.deadline,
+            description=task.description,
+            status=task.status,
+            user_id=current_user.id
+        )
 
-
-@app.get("/categories/{category_id}")
-def read_category(category_id: int):
-    with Session(engine) as session:
-        category = session.exec(select(Category).where(Category.id == category_id)).one()
-        if not category:
-            raise HTTPException(status_code=404, detail="Категория не найдена")
-        return CategoryId(id = category.id, name = category.name)
-
-
-@app.put("/categories/", response_model=CategoryId)
-def update_category(category_update: CategoryId):
-    with Session(engine) as session:
-        category = session.exec(select(Category).where(Category.id == category_update.id)).one()
-        if not category:
-            raise HTTPException(status_code=404, detail="Категория не найдена")
-
-        category.name = category_update.name
-        session.add(category)
+        session.add(db_task)
         session.commit()
-        session.refresh(category)
-        return CategoryId(id = category.id, name = category.name)
+        session.refresh(db_task)
 
+        return TaskId(
+            id=db_task.id,
+            title=db_task.title,
+            priority=db_task.priority,
+            deadline=db_task.deadline,
+            description=db_task.description,
+            status=db_task.status
+        )
 
-@app.delete("/categories/{category_id}")
-def delete_category(category_id: int):
+@app.get("/tasks/")
+def read_tasks(task_status: TaskStatus | None = Query(default=None, alias="status"), sort_deadline: DeadlineSort | None = Query(default=None),current_user: User = Depends(get_current_user)):
     with Session(engine) as session:
-        category = session.exec(select(Category).where(Category.id == category_id)).one()
-        if not category:
-            raise HTTPException(status_code=404, detail="Категория не найдена")
-        session.delete(category)
+        statement = select(Task).where(Task.user_id == current_user.id)
+
+        if task_status is not None:
+            statement = statement.where(Task.status == task_status)
+
+        if sort_deadline == "asc":
+            statement = statement.order_by(Task.deadline)
+
+        if sort_deadline == "desc":
+            statement = statement.order_by(Task.deadline.desc())
+
+        tasks = session.exec(statement).all()
+        return tasks
+
+@app.get("/tasks/{task_id}")
+def read_task(task_id: int, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        task = session.exec(
+            select(Task).where(
+                Task.id == task_id,
+                Task.user_id == current_user.id,
+            )).first()
+
+        if not task:
+            raise HTTPException(status_code=404, detail="Задача не найдена")
+
+        return task
+
+
+@app.put("/tasks/")
+def update_task(task_update: TaskUpdate, current_user: User = Depends(get_current_user),):
+    with Session(engine) as session:
+        task = session.exec(
+            select(Task).where(
+                Task.id == task_update.id,
+                Task.user_id == current_user.id,
+            )).first()
+
+        if not task:
+            raise HTTPException(status_code=404, detail="Задача не найдена")
+
+        update_data = task_update.model_dump(exclude_unset=True)
+        update_data.pop("id")
+
+        for field_name, field_value in update_data.items():
+            setattr(task, field_name, field_value)
+
+        session.add(task)
         session.commit()
-        return {"detail": "Категория успешно удалена"}
+        session.refresh(task)
+
+        return task
 
 
-
-@app.post("/products/", status_code=201)
-def create_product(product: ProductBase):
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int, current_user: User = Depends(get_current_user)):
     with Session(engine) as session:
-        db_product = Product(name=product.name, price=product.price, description=product.description, category_id=product.category_id)
-        session.add(db_product)
+        task = session.exec(
+            select(Task).where(
+                Task.id == task_id,
+                Task.user_id == current_user.id,
+            )).first()
+
+        if not task:
+            raise HTTPException(status_code=404, detail="Задача не найдена")
+
+        session.delete(task)
         session.commit()
-        session.refresh(db_product)
-        return ProductId(id=db_product.id, name=db_product.name, price=db_product.price, description=db_product.description, category_id=db_product.category_id)
 
-
-@app.get("/products/")
-def read_products():
-    with Session(engine) as session:
-        products = session.exec(select(Product)).all()
-        return products
-
-
-@app.get("/products/{product_id}")
-def read_category(product_id: int):
-    with Session(engine) as session:
-        product = session.exec(select(Product).where(Product.id == product_id)).one()
-        if not product:
-            raise HTTPException(status_code=404, detail="Продукт не найден")
-        return ProductId(id=product.id, name=product.name, price=product.price, description=product.description, category_id=product.category_id)
-
-
-@app.put("/products/", response_model=ProductId)
-def update_product(product_update: ProductId):
-    with Session(engine) as session:
-        product = session.exec(select(Product).where(Product.id == product_update.id)).one()
-        if not product:
-            raise HTTPException(status_code=404, detail="Продукт не найден")
-
-        product.name = product_update.name or product.name
-        product.price = product_update.price or product.price
-        product.description = product_update.description or product.description
-        product.category_id = product_update.category_id or product.category_id
-        session.add(product)
-        session.commit()
-        session.refresh(product)
-        return ProductId(id=product.id, name=product.name, price=product.price, description=product.description, category_id=product.category_id)
-
-
-@app.delete("/products/{product_id}")
-def delete_product(product_id: int):
-    with Session(engine) as session:
-        product = session.exec(select(Product).where(Product.id == product_id)).one()
-        if not product:
-            raise HTTPException(status_code=404, detail="Продукт не найден")
-        session.delete(product)
-        session.commit()
-        return {"detail": "Продукт успешно удален"}
+        return {"detail": "Задача успешно удалена"}
